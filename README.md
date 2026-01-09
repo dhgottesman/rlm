@@ -98,14 +98,13 @@ modal setup   # authenticate account
 ```
 
 #### Prime Intellect Sandboxes <img src="https://github.com/PrimeIntellect-ai.png" alt="Prime Intellect" height="20" style="vertical-align: middle;"/>
-> [!WARNING]
-> **Prime Intellect Sandboxes** are currently a beta feature. See the [documentation](https://docs.primeintellect.ai/sandboxes/overview) for more information.
+> [!NOTE]
+> **Prime Intellect Sandboxes** are currently a beta feature. See the [documentation](https://docs.primeintellect.ai/sandboxes/overview) for more information. We noticed slow runtimes when using these sandboxes, which is currently an open issue.
 
-> [!IMPORTANT]
-> **Prime Intellect Sandboxes are not yet implemented** in `rlm`. This feature is not available at the moment until we patch some bugs.
 
-See [Prime CLI setup instructions](https://docs.primeintellect.ai/inference/overview) for getting setup. You will need to set your CLI key.
+To use [Prime Sandboxes](https://docs.primeintellect.ai/sandboxes/sdk), install the SDK and set your API key:
 ```bash
+uv pip install -e ".[prime]"
 export PRIME_API_KEY=...
 ```
 

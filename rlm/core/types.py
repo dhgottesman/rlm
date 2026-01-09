@@ -13,7 +13,7 @@ ClientBackend = Literal[
     "azure_openai",
     "gemini",
 ]
-EnvironmentType = Literal["local", "prime", "modal"]
+EnvironmentType = Literal["local", "docker", "modal", "prime"]
 
 
 def _serialize_value(value: Any) -> Any:

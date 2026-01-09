@@ -10,6 +10,7 @@ import requests
 from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_batched
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import IsolatedEnv
+from rlm.environments.constants import APT_PACKAGES, PIP_PACKAGES
 
 # =============================================================================
 # Default Modal Image
@@ -23,35 +24,8 @@ def get_default_image() -> modal.Image:
     """
     return (
         modal.Image.debian_slim(python_version="3.11")
-        .apt_install(
-            "build-essential",
-            "git",
-            "curl",
-            "wget",
-            "libopenblas-dev",
-            "liblapack-dev",
-        )
-        .pip_install(
-            # Data science essentials
-            "numpy>=1.26.0",
-            "pandas>=2.1.0",
-            "scipy>=1.11.0",
-            # Math & symbolic computation
-            "sympy>=1.12",
-            # HTTP & APIs
-            "requests>=2.31.0",
-            "httpx>=0.25.0",
-            "flask>=3.0.0",
-            # Data formats
-            "pyyaml>=6.0",
-            "toml>=0.10.2",
-            # Utilities
-            "tqdm>=4.66.0",
-            "python-dateutil>=2.8.2",
-            "regex>=2023.0.0",
-            # For state serialization
-            "dill>=0.3.7",
-        )
+        .apt_install(*APT_PACKAGES)
+        .pip_install(*PIP_PACKAGES)
     )
 
 
