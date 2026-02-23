@@ -57,6 +57,12 @@ def get_client(
         from rlm.clients.azure_openai import AzureOpenAIClient
 
         return AzureOpenAIClient(**backend_kwargs)
+    
+    elif backend == "qwen":
+        from rlm.clients.qwen import QwenClient
+
+        return QwenClient(**backend_kwargs)
+
     else:
         raise ValueError(
             f"Unknown backend: {backend}. Supported backends: ['openai', 'vllm', 'portkey', 'openrouter', 'litellm', 'anthropic', 'azure_openai', 'gemini', 'vercel']"

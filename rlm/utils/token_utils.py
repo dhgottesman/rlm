@@ -52,6 +52,7 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "qwen3-72b": 128_000,
     "qwen3-32b": 128_000,
     "qwen3-8b": 32_768,
+    "qwen3-4b": 32_768,
     "qwen3": 128_000,
     # Kimi (Moonshot)
     "kimi-k2.5": 262_000,
