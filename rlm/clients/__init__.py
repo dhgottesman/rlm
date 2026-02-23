@@ -57,7 +57,7 @@ def get_client(
         from rlm.clients.azure_openai import AzureOpenAIClient
 
         return AzureOpenAIClient(**backend_kwargs)
-    
+
     elif backend == "qwen":
         from rlm.clients.qwen import QwenClient
 

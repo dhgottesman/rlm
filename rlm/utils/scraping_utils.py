@@ -1,16 +1,15 @@
 import hashlib
 import json
 import re
+import threading
+import time
 import unicodedata
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-
-import time
 from ddgs import DDGS
-from urllib.parse import urlparse
-import threading
 
 CACHE_DIR = Path("/home/morg/students/gottesman3/rlm/scraped_webpages")
 URL_MAP_FILE = CACHE_DIR / "url_map.json"
@@ -18,6 +17,7 @@ URL_MAP_FILE = CACHE_DIR / "url_map.json"
 last_domain_hit: dict[str, float] = {}
 _lock = threading.Lock()
 CRAWL_DELAY = 1.0
+
 
 def _normalize_url(url: str) -> str:
     """Normalize URL to a consistent cache key."""
@@ -70,9 +70,12 @@ def scrape_url(url: str) -> str:
 
     # Cache miss — scrape
     try:
-        response = httpx.get(url, timeout=10, follow_redirects=True, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; research-bot/1.0)"
-        })
+        response = httpx.get(
+            url,
+            timeout=10,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; research-bot/1.0)"},
+        )
         last_domain_hit[domain] = time.time()
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
@@ -82,11 +85,11 @@ def scrape_url(url: str) -> str:
 
         # Prefer main content area
         main = (
-            soup.find("main") or
-            soup.find("article") or
-            soup.find(id="content") or
-            soup.find(class_="content") or
-            soup.body
+            soup.find("main")
+            or soup.find("article")
+            or soup.find(id="content")
+            or soup.find(class_="content")
+            or soup.body
         )
 
         text = main.get_text(separator=" ")
@@ -103,6 +106,7 @@ def scrape_url(url: str) -> str:
     _save_url_map(url_map)
 
     return text
+
 
 def web_search(query: str, max_results: int = 5) -> str:
     with DDGS() as ddgs:

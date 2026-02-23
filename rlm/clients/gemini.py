@@ -59,8 +59,13 @@ class GeminiClient(BaseLM):
             raise ValueError("Model name is required for Gemini client.")
 
         config = None
+        search_tool = types.Tool(google_search=types.GoogleSearch())
         if system_instruction:
-            config = types.GenerateContentConfig(system_instruction=system_instruction)
+            config = types.GenerateContentConfig(
+                system_instruction=system_instruction, tools=[search_tool]
+            )
+        else:
+            config = types.GenerateContentConfig(tools=[search_tool])
 
         response = self.client.models.generate_content(
             model=model,

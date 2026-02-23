@@ -1,15 +1,12 @@
-import builtins
 import json
 from collections import defaultdict
 from typing import Any
-from utils.scraping_utils import scrape_url
-from ddgs import DDGS
+
 from openai import AsyncOpenAI, OpenAI
+from utils.scraping_utils import web_search
 
 from rlm.clients.base_lm import BaseLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
-
-from utils.scraping_utils import web_search
 
 DEFAULT_VLLM_BASE_URL = "http://rack-gamir-g11.cs.tau.ac.il:8000/v1"
 
@@ -20,9 +17,7 @@ SEARCH_TOOL = {
         "description": "Search the web for current information on a topic. Often this is a very large string so you are encouraged to iteratively process it.",
         "parameters": {
             "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "The search query"}
-            },
+            "properties": {"query": {"type": "string", "description": "The search query"}},
             "required": ["query"],
         },
     },
@@ -73,11 +68,13 @@ class QwenClient(BaseLM):
         for tool_call in message.tool_calls:
             args = json.loads(tool_call.function.arguments)
             result = web_search(args["query"], self.search_max_results)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": result,
-            })
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result,
+                }
+            )
         return messages
 
     def _run_loop(self, messages: list[dict[str, Any]]) -> tuple[str, Any]:
@@ -139,7 +136,9 @@ class QwenClient(BaseLM):
         result, _ = self._run_loop(messages)
         return result
 
-    async def acompletion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
+    async def acompletion(
+        self, prompt: str | list[dict[str, Any]], model: str | None = None
+    ) -> str:
         if model:
             self.model_name = model
         messages = self._to_messages(prompt)

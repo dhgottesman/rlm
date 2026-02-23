@@ -1,6 +1,7 @@
-from openai import OpenAI
-from ddgs import DDGS
 import json
+
+from ddgs import DDGS
+from openai import OpenAI
 
 client = OpenAI(base_url="http://rack-gamir-g11.cs.tau.ac.il:8000/v1", api_key="dummy")
 MODEL = "Qwen/Qwen3-4B"
@@ -13,12 +14,10 @@ tools = [
             "description": "Search the web for current information on a topic",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The search query"}
-                },
-                "required": ["query"]
-            }
-        }
+                "properties": {"query": {"type": "string", "description": "The search query"}},
+                "required": ["query"],
+            },
+        },
     }
 ]
 
@@ -45,7 +44,7 @@ def run(user_message: str):
             messages=messages,
             tools=tools,
             tool_choice="auto",
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
         )
 
         message = response.choices[0].message
@@ -61,14 +60,15 @@ def run(user_message: str):
         for tool_call in message.tool_calls:
             args = json.loads(tool_call.function.arguments)
             result = web_search(args["query"])
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": result
-            })
+            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
 
 
 if __name__ == "__main__":
     import sys
-    query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "What are the latest developments in AI this week?"
+
+    query = (
+        " ".join(sys.argv[1:])
+        if len(sys.argv) > 1
+        else "What are the latest developments in AI this week?"
+    )
     run(query)
