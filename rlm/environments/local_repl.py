@@ -21,8 +21,6 @@ from rlm.environments.base_env import (
     validate_custom_tools,
 )
 
-# from utils.scraping_utils import web_search
-
 
 # =============================================================================
 # Safe Builtins
@@ -197,7 +195,6 @@ class LocalREPL(NonIsolatedEnv):
         self.globals["llm_query_batched"] = self._llm_query_batched
         self.globals["rlm_query"] = self._rlm_query
         self.globals["rlm_query_batched"] = self._rlm_query_batched
-        # self.globals["web_search"] = self._web_search
 
         # Add custom tools to globals
         # Tools can be either plain values or (value, description) tuples
@@ -346,9 +343,6 @@ class LocalREPL(NonIsolatedEnv):
         # Fall back to plain batched LM call if no recursive capability
         return self._llm_query_batched(prompts, model)
 
-    # def _web_search(self, query: str, max_results: int = 10) -> str:
-    #     return web_search(query, max_results)
-
     def load_context(self, context_payload: dict | list | str):
         """Load context into the environment as context_0 (and 'context' alias)."""
         self.add_context(context_payload, 0)
@@ -485,8 +479,6 @@ class LocalREPL(NonIsolatedEnv):
                 self.locals["history"] = self.locals["history_0"]
             elif name == "history" and self.compaction:
                 self.locals["history"] = self._compaction_history
-            # elif name == "web_search":
-            #     self.globals["web_search"] = self._web_search
 
     def execute_code(self, code: str) -> REPLResult:
         """Execute code in the persistent namespace and return result."""
