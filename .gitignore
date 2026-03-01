@@ -218,4 +218,5 @@ __marimo__/
 scraped_webpages/
 
 run.slurm
-experiments/
+experiments/*
+!experiments/*.gz
