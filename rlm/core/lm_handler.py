@@ -80,7 +80,14 @@ class LMRequestHandler(StreamRequestHandler):
         )
 
     def _handle_batched(self, request: LMRequest, handler: "LMHandler") -> LMResponse:
-        """Handle a batched prompts request using async for concurrency."""
+        """Handle a batched prompts request on the shared persistent async loop.
+
+        All coroutines are gathered on handler._async_loop (run_forever in its
+        own thread) via run_coroutine_threadsafe.  Because that loop is never
+        closed between calls, httpx/google-genai connection-cleanup tasks always
+        have a live loop to schedule on, avoiding RuntimeError('Event loop is
+        closed') errors that occur when asyncio.run() tears down a fresh loop.
+        """
         client = handler.get_client(request.model, request.depth)
 
         start_time = time.perf_counter()
@@ -89,7 +96,10 @@ class LMRequestHandler(StreamRequestHandler):
             tasks = [client.acompletion(prompt) for prompt in request.prompts]
             return await asyncio.gather(*tasks)
 
-        results = asyncio.run(run_all())
+        # Submit to the shared loop and block this handler thread until done.
+        # Timeouts are enforced by each client's own HTTP timeout settings.
+        future = asyncio.run_coroutine_threadsafe(run_all(), handler._async_loop)
+        results = future.result()
         end_time = time.perf_counter()
 
         total_time = end_time - start_time
@@ -141,6 +151,13 @@ class LMHandler:
         self._thread: Thread | None = None
         self._port = port
 
+        # Persistent async event loop running in a dedicated background thread.
+        # _handle_batched submits coroutines here via run_coroutine_threadsafe so
+        # the loop is never closed between calls — avoiding the httpx/asyncio
+        # "Event loop is closed" cleanup error that asyncio.run() triggers.
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._async_thread: Thread | None = None
+
         self.register_client(client.model_name, client)
 
     def register_client(self, model_name: str, client: BaseLM) -> None:
@@ -177,9 +194,19 @@ class LMHandler:
         return (self.host, self.port)
 
     def start(self) -> tuple[str, int]:
-        """Start the socket server in a background thread. Returns (host, port)."""
+        """Start the socket server and persistent async loop in background threads."""
         if self._server is not None:
             return self.address
+
+        # Start the shared event loop before the TCP server so it is ready the
+        # moment the first batched request arrives.
+        self._async_loop = asyncio.new_event_loop()
+        self._async_thread = Thread(
+            target=self._async_loop.run_forever,
+            daemon=True,
+            name="lm-handler-async-loop",
+        )
+        self._async_thread.start()
 
         self._server = ThreadingLMServer((self.host, self._port), LMRequestHandler)
         self._server.lm_handler = self  # type: ignore
@@ -190,11 +217,21 @@ class LMHandler:
         return self.address
 
     def stop(self):
-        """Stop the socket server."""
+        """Stop the socket server and shut down the shared async event loop."""
         if self._server:
             self._server.shutdown()
             self._server = None
             self._thread = None
+
+        # Signal the event loop to stop, then wait for its thread to exit so
+        # that any in-flight cleanup coroutines (e.g. httpx connection teardown)
+        # have a chance to complete before the loop is discarded.
+        if self._async_loop is not None and self._async_loop.is_running():
+            self._async_loop.call_soon_threadsafe(self._async_loop.stop)
+            if self._async_thread is not None:
+                self._async_thread.join(timeout=5)
+        self._async_loop = None
+        self._async_thread = None
 
     def completion(self, prompt: str, model: str | None = None) -> str:
         """Direct completion call (for main process use)."""

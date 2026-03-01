@@ -9,7 +9,7 @@ RLM_SYSTEM_PROMPT = textwrap.dedent(
 
 The REPL environment is initialized with:
 1. A `context` variable that contains extremely important information about your query. You should check the content of the `context` variable to understand what you are working with. Make sure you look through it sufficiently as you answer your query.
-2. A `llm_query(prompt, model=None)` function that makes a single LLM completion call (no REPL, no iteration). Fast and lightweight -- use this for simple extraction, summarization, or Q&A over a chunk of text. The sub-LLM can handle around 500K chars.
+2. A `llm_query(prompt, model=None)` function that makes a single LLM completion call (no REPL, no iteration). Fast and lightweight — use this for extraction, summarization, Q&A over a chunk of text, or **internet searches** (the sub-LLM has live web search capability and can look up current information). The sub-LLM can handle around 500K chars.
 3. A `llm_query_batched(prompts, model=None)` function that runs multiple `llm_query` calls concurrently: returns `List[str]` in the same order as input prompts. Much faster than sequential `llm_query` calls for independent queries.
 4. A `rlm_query(prompt, model=None)` function that spawns a **recursive RLM sub-call** for deeper thinking subtasks. The child gets its own REPL environment and can reason iteratively over the prompt, just like you. Use this when a subtask requires multi-step reasoning, code execution, or its own iterative problem-solving -- not just a simple one-shot answer. Falls back to `llm_query` if recursion is not available.
 5. A `rlm_query_batched(prompts, model=None)` function that spawns multiple recursive RLM sub-calls. Each prompt gets its own child RLM. Falls back to `llm_query_batched` if recursion is not available.
@@ -18,10 +18,15 @@ The REPL environment is initialized with:
 {custom_tools_section}
 
 **When to use `llm_query` vs `rlm_query`:**
-- Use `llm_query` for simple, one-shot tasks: extracting info from a chunk, summarizing text, answering a factual question, classifying content. These are fast single LLM calls.
+- Use `llm_query` for simple, one-shot tasks: extracting info from a chunk, summarizing text, answering a factual question, classifying content, or **searching the internet for a specific piece of information**. These are fast single LLM calls.
 - Use `rlm_query` when the subtask itself requires deeper thinking: multi-step reasoning, solving a sub-problem that needs its own REPL and iteration, or tasks where a single LLM call might not be enough. The child RLM can write and run code, query further sub-LLMs, and iterate to find the answer.
 
-**Breaking down problems:** You must break problems into more digestible components—whether that means chunking or summarizing a large context, or decomposing a hard task into easier sub-problems and delegating them via `llm_query` / `rlm_query`. Use the REPL to write a **programmatic strategy** that uses these LLM calls to solve the problem, as if you were building an agent: plan steps, branch on results, combine answers in code.
+**Breaking down problems — write modular code, not one-shot answers:** Never attempt to answer the full query with a single `llm_query` or `rlm_query` call. Instead, write Python code that treats the problem as a pipeline: decompose it into sub-questions or processing steps, assign each to a separate call, store results in named variables, and combine them in code to build the final answer. Define helper functions, loop over items, branch on intermediate results. The REPL is your workspace — structure your reasoning as executable code, not as a single large prompt.
+
+**Search and information gathering:** When the task requires finding information online, use `llm_query` to search — but follow this discipline:
+- You may attempt **one broad search** to orient yourself. If it fully answers the query, use it.
+- If the first search is insufficient, **do not retry the same broad query**. Instead, decompose into specific sub-questions (who/what/when/where) and issue a separate focused `llm_query` per sub-question. Use `llm_query_batched` to run them concurrently.
+- Treat search results as raw data: extract structured facts in Python, filter/combine them in code, then pass the combined evidence to a final `llm_query` for synthesis.
 
 **REPL for computation:** You can also use the REPL to compute programmatic steps (e.g. `math.sin(x)`, distances, physics formulas) and then chain those results into an LLM call. For complex math or physics, compute intermediate quantities in code and pass the numbers to the LM for interpretation or the final answer. Example: data describes an electron in a magnetic field undergoing helical motion; task is to find the entry angle.
 ```repl
@@ -97,19 +102,79 @@ As a final example, implement the solution as a **program**: try one approach vi
 r = rlm_query("Prove sqrt 2 is irrational. Give a 1-2 sentence proof, or reply only: USE_LEMMA or USE_CONTRADICTION.")
 if "USE_LEMMA" in r.upper():
     final_answer = rlm_query("Prove 'n^2 even => n even' then use it to show sqrt 2 irrational. Two sentences.")
+```
 
-IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL function when you have completed your task, NOT in code. Do not use these tags unless you have completed your task. You have two options:
-1. Use FINAL(your final answer here) to provide the answer directly
-2. Use FINAL_VAR(variable_name) to return a variable you have created in the REPL environment as your final output
+For tasks that require searching the internet, decompose into sub-questions and search each separately. Example: "What percentage of artists in the Billboard Hot 100 in 2020 were born outside the United States?"
+```repl
+# Step 1: one broad search — might get a direct answer, but likely needs decomposition
+broad = llm_query("What percentage of artists in the Billboard Year-End Hot 100 2020 were born outside the United States?")
+print(broad)  # inspect — if confident and sourced, done; otherwise proceed below
 
-WARNING - COMMON MISTAKE: FINAL_VAR retrieves an EXISTING variable. You MUST create and assign the variable in a ```repl``` block FIRST, then call FINAL_VAR in a SEPARATE step. For example:
-- WRONG: Calling FINAL_VAR(my_answer) without first creating `my_answer` in a repl block
-- CORRECT: First run ```repl
-my_answer = "the result"
-print(my_answer)
-``` then in the NEXT response call FINAL_VAR(my_answer)
+# Step 2: get the actual chart to work from ground truth
+hot100_raw = llm_query(
+    "List all entries from the Billboard Year-End Hot 100 chart for 2020. "
+    "Format each as 'RANK. Artist - Song Title', one per line."
+)
+print(hot100_raw[:300])
 
-If you're unsure what variables exist, you can call SHOW_VARS() in a repl block to see all available variables.
+# Step 3: extract unique artist names from the chart
+artists_raw = llm_query(
+    f"From this Billboard Year-End Hot 100 2020 list, extract every unique artist name. "
+    f"List one name per line, no numbering, no extra text:\\n{{hot100_raw}}"
+)
+artists = [a.strip() for a in artists_raw.strip().split("\\n") if a.strip()]
+print(f"{{len(artists)}} unique artists found: {{artists[:10]}}")
+
+# Step 4: for each artist, ask whether they were born in the US — yes/no avoids string-matching issues
+us_prompts = [
+    f"Was the musical artist '{{artist}}' born in the United States? "
+    f"Reply with ONLY 'yes' or 'no'. If unknown, reply 'unknown'."
+    for artist in artists
+]
+us_answers = llm_query_batched(us_prompts)
+artist_us = list(zip(artists, us_answers))
+print(artist_us[:20])
+
+# Step 5: count
+non_us = [(a, r) for a, r in artist_us if r.strip().lower() == "no"]
+unknown = [(a, r) for a, r in artist_us if r.strip().lower() == "unknown"]
+pct_non_us = len(non_us) / len(artists) * 100
+print(f"Non-US: {{len(non_us)}}, Unknown: {{len(unknown)}}, Total unique: {{len(artists)}}")
+print("Non-US artists:", [a for a, _ in non_us])
+
+# Step 6: synthesize a final answer
+final_answer = llm_query(
+    f"Based on the Billboard Year-End Hot 100 for 2020, {{len(non_us)}} out of {{len(artists)}} "
+    f"unique artists ({{pct_non_us:.1f}}%) were born outside the United States. "
+    f"Non-US artists: {{[a for a, _ in non_us]}}. "
+    f"Write a clear, concise answer to the original question."
+)
+print(final_answer)
+```
+
+IMPORTANT: When you have completed your task, signal your final answer in plain text — NOT inside a ```repl``` block. You have two options:
+
+Option 1 — FINAL(answer text)
+Write your answer directly inside the parentheses. Use this when the answer is short or you can state it inline, even if you used the REPL to get there.
+Example:  FINAL(The boiling point of water is 100°C.)
+
+Option 2 — FINAL_VAR(variable_name)
+Use this when your answer is a long string you already built and stored in a variable during a repl block. FINAL_VAR looks up that variable by name from the REPL and returns its string value.
+
+CRITICAL — FINAL_VAR is a strict two-step process across two separate responses:
+  Step 1: In a ```repl``` block, assign the variable and print it to confirm it exists:
+    ```repl
+    my_answer = llm_query("Summarize the findings...")
+    print(my_answer)
+    ```
+  Step 2: Only after seeing the REPL output in the next response, write:
+    FINAL_VAR(my_answer)
+
+- FINAL_VAR does NOT create a variable — it only reads one that already exists from a prior repl block.
+- If the variable doesn't exist yet, FINAL_VAR will return an error and you will be prompted to continue.
+- If you're unsure what variables exist, call SHOW_VARS() in a repl block first.
+
+Do not call FINAL or FINAL_VAR until you have a complete answer.
 
 Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this" or "I will do that". Output to the REPL environment and recursive LLMs as much as possible. Remember to explicitly answer the original query in your final answer.
 """
@@ -163,8 +228,8 @@ def build_rlm_system_prompt(
     ]
 
 
-USER_PROMPT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the prompt.\n\nContinue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to ```repl``` tags, and determine your answer. Your next action:"""
-USER_PROMPT_WITH_ROOT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original prompt: \"{root_prompt}\".\n\nContinue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to ```repl``` tags, and determine your answer. Your next action:"""
+USER_PROMPT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the prompt.\n\nContinue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to ```repl``` tags, and determine your answer. If you already have a confident answer, call FINAL(your answer here) or FINAL_VAR(variable_name) now. If not, your next action:"""
+USER_PROMPT_WITH_ROOT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original prompt: \"{root_prompt}\".\n\nContinue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to ```repl``` tags, and determine your answer. If you already have a confident answer, call FINAL(your answer here) or FINAL_VAR(variable_name) now. If not, your next action:"""
 
 
 def build_user_prompt(
@@ -172,9 +237,34 @@ def build_user_prompt(
     iteration: int = 0,
     context_count: int = 1,
     history_count: int = 0,
+    context_total_length: int = 0,
+    context_peeked: bool = False,
 ) -> dict[str, str]:
     if iteration == 0:
-        safeguard = "You have not interacted with the REPL environment or seen your prompt / context yet. Your next action should be to look through and figure out how to answer the prompt, so don't just provide a final answer yet.\n\n"
+        if context_peeked:
+            if context_total_length >= 500:
+                safeguard = (
+                    f"The context preview (first 200 characters of {context_total_length} total) "
+                    f"is already shown above. The full context is too large to print at once — "
+                    f"use a chunking strategy to examine it in pieces before answering.\n\n"
+                )
+            else:
+                safeguard = (
+                    "The full context is already shown above. "
+                    "If the answer is immediately clear, call FINAL() right away.\n\n"
+                )
+        else:
+            # Peek injection failed or was skipped — fall back to instructing the model
+            if context_total_length < 500:
+                safeguard = "You have not interacted with the REPL environment or seen your prompt / context yet. Your FIRST action must be to run `print(context)` in the REPL to confirm what you are working with — do not reason or answer anything until you have read the actual content of `context`. After reading it, if the answer is immediately clear, call FINAL() right away.\n\n"
+            else:
+                safeguard = (
+                    f"You have not interacted with the REPL environment or seen your prompt / context yet. "
+                    f"Your FIRST action must be to run `print(context[:200])` in the REPL to peek at the beginning of the context — "
+                    f"the full context is {context_total_length} characters long and is too large to print at once. "
+                    f"After peeking, use a chunking strategy (e.g. loop over slices or split into chunks and call `llm_query` / `llm_query_batched`) "
+                    f"to examine the context in pieces. Do NOT call FINAL() until you have covered the relevant portions.\n\n"
+                )
         prompt = safeguard + (
             USER_PROMPT_WITH_ROOT.format(root_prompt=root_prompt) if root_prompt else USER_PROMPT
         )

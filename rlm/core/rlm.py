@@ -256,6 +256,7 @@ class RLM:
         up the initial message history.
         """
         metadata = QueryMetadata(prompt)
+        self._context_total_length = metadata.context_total_length
         message_history = build_rlm_system_prompt(
             system_prompt=self.system_prompt,
             query_metadata=metadata,
@@ -300,6 +301,7 @@ class RLM:
 
         with self._spawn_completion_context(prompt) as (lm_handler, environment):
             message_history = self._setup_prompt(prompt)
+            self._context_peeked = self._inject_context_peek(message_history, environment)
 
             compaction_count = 0
             try:
@@ -334,7 +336,7 @@ class RLM:
                         else 0
                     )
                     current_prompt = message_history + [
-                        build_user_prompt(root_prompt, i, context_count, history_count)
+                        build_user_prompt(root_prompt, i, context_count, history_count, getattr(self, "_context_total_length", 0), getattr(self, "_context_peeked", False))
                     ]
 
                     iteration: RLMIteration = self._completion_turn(
@@ -581,6 +583,27 @@ class RLM:
             },
         ]
         return new_history
+
+    def _inject_context_peek(
+        self, message_history: list[dict[str, Any]], environment: BaseEnv
+    ) -> bool:
+        """
+        Execute an initial context peek and inject the formatted result into message_history.
+        Returns True if the peek was successfully injected.
+        """
+        context_length = getattr(self, "_context_total_length", 0)
+        peek_code = "print(context)" if context_length < 500 else "print(context[:200])"
+        try:
+            result: REPLResult = environment.execute_code(peek_code)
+            fake_iteration = RLMIteration(
+                prompt=[],
+                response=f"Let me first look at the context.\n```repl\n{peek_code}\n```",
+                code_blocks=[CodeBlock(code=peek_code, result=result)],
+            )
+            message_history.extend(format_iteration(fake_iteration))
+            return True
+        except Exception:
+            return False
 
     def _completion_turn(
         self,
