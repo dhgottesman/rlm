@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -52,14 +53,28 @@ if os.path.exists(filename):
         for line in f:
             processed_queries.add(json.loads(line)["question"])
 
+total_tokens = 0
+
 for example in tqdm(data, total=len(data)):
     if example["question"] in processed_queries:
         print(f"Skipping {example['question']}")
         continue
 
-    record = process_example(example)
+    while True:
+        try:
+            record = process_example(example)
+            break
+        except Exception as e:
+            print(f'Trying again {repr(e)}: {record["ex_id"]}')
+            time.sleep(61)
+
     if record:
         results.append(record)
         with open(filename, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
             f.flush()
+        record_total_tokens = record["usage_summary"]["gemini-2.5-flash"]["total_output_tokens"] + record["usage_summary"]["gemini-2.5-flash"]["total_input_tokens"]
+
+        if total_tokens + record_total_tokens > 1000000:
+            time.sleep(61)
+            total_tokens = 0
