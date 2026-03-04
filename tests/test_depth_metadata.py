@@ -54,6 +54,7 @@ class TestDepth1CompletionLoop:
                 backend="openai",
                 backend_kwargs={"model_name": "test-model"},
                 max_depth=1,
+                phased_flow=False,
             )
             result = rlm.completion("What is the answer?")
             assert result.response == "42"
@@ -75,6 +76,7 @@ class TestDepth1CompletionLoop:
                 backend="openai",
                 backend_kwargs={"model_name": "test-model"},
                 max_depth=1,
+                phased_flow=False,
             )
             result = rlm.completion("Compute 2*2")
             assert result.response == "4"
@@ -323,6 +325,7 @@ class TestDepth1LoggerMetadata:
                 backend_kwargs={"model_name": "test-model"},
                 max_depth=1,
                 logger=logger,
+                phased_flow=False,
             )
             result = rlm.completion("What is the answer?")
 
@@ -342,6 +345,7 @@ class TestDepth1LoggerMetadata:
                 backend="openai",
                 backend_kwargs={"model_name": "test-model"},
                 max_depth=1,
+                phased_flow=False,
             )
             result = rlm.completion("What is the answer?")
             assert result.metadata is None
@@ -364,6 +368,7 @@ class TestDepth1LoggerMetadata:
                 backend_kwargs={"model_name": "test-model"},
                 max_depth=1,
                 logger=logger,
+                phased_flow=False,
             )
             result = rlm.completion("compute")
 

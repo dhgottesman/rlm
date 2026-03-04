@@ -144,7 +144,7 @@ class TestLocalREPLHelpers:
     def test_llm_query_no_handler(self):
         """Test llm_query without handler configured."""
         repl = LocalREPL()
-        _ = repl.execute_code("response = llm_query('test')")
+        _ = repl.execute_code("response = llm_query('test', return_type=str)")
         assert "Error" in repl.locals["response"]
         repl.cleanup()
 
@@ -195,7 +195,7 @@ class TestLocalREPLScaffoldRestoration:
         repl = LocalREPL()
         repl.execute_code("llm_query = lambda x: 'hijacked'")
 
-        repl.execute_code("r = llm_query('test')")
+        repl.execute_code("r = llm_query('test', return_type=str)")
         assert "Error" in repl.locals["r"]
         repl.cleanup()
 

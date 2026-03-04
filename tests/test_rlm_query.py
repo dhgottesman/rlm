@@ -24,7 +24,7 @@ class TestRlmQueryWithSubcallFn:
         """rlm_query should use subcall_fn when available."""
         subcall_fn = MagicMock(return_value=_make_completion("child response"))
         repl = LocalREPL(subcall_fn=subcall_fn)
-        result = repl.execute_code("response = rlm_query('hello')")
+        result = repl.execute_code("response = rlm_query('hello', return_type=str)")
         assert result.stderr == ""
         assert repl.locals["response"] == "child response"
         subcall_fn.assert_called_once_with("hello", None)
@@ -34,7 +34,7 @@ class TestRlmQueryWithSubcallFn:
         """rlm_query should pass model to subcall_fn."""
         subcall_fn = MagicMock(return_value=_make_completion("override response"))
         repl = LocalREPL(subcall_fn=subcall_fn)
-        repl.execute_code("response = rlm_query('hello', model='gpt-4')")
+        repl.execute_code("response = rlm_query('hello', model='gpt-4', return_type=str)")
         assert repl.locals["response"] == "override response"
         subcall_fn.assert_called_once_with("hello", "gpt-4")
         repl.cleanup()
@@ -44,7 +44,7 @@ class TestRlmQueryWithSubcallFn:
         completion = _make_completion("tracked")
         subcall_fn = MagicMock(return_value=completion)
         repl = LocalREPL(subcall_fn=subcall_fn)
-        result = repl.execute_code("rlm_query('test')")
+        result = repl.execute_code("rlm_query('test', return_type=str)")
         assert len(result.rlm_calls) == 1
         assert result.rlm_calls[0].response == "tracked"
         repl.cleanup()
@@ -53,7 +53,7 @@ class TestRlmQueryWithSubcallFn:
         """rlm_query should return error string if subcall_fn raises."""
         subcall_fn = MagicMock(side_effect=RuntimeError("subcall failed"))
         repl = LocalREPL(subcall_fn=subcall_fn)
-        result = repl.execute_code("response = rlm_query('hello')")
+        result = repl.execute_code("response = rlm_query('hello', return_type=str)")
         assert result.stderr == ""
         assert "Error" in repl.locals["response"]
         assert "subcall failed" in repl.locals["response"]
@@ -66,7 +66,7 @@ class TestRlmQueryWithoutSubcallFn:
     def test_rlm_query_falls_back_to_llm_query(self):
         """Without subcall_fn, rlm_query should fall back to llm_query (which returns error without handler)."""
         repl = LocalREPL()
-        repl.execute_code("response = rlm_query('test')")
+        repl.execute_code("response = rlm_query('test', return_type=str)")
         assert "Error" in repl.locals["response"]
         repl.cleanup()
 
@@ -84,7 +84,7 @@ class TestRlmQueryBatchedWithSubcallFn:
         subcall_fn = MagicMock(side_effect=completions)
         repl = LocalREPL(subcall_fn=subcall_fn)
         result = repl.execute_code(
-            "answers = rlm_query_batched(['q1', 'q2', 'q3'])\nprint(len(answers))"
+            "answers = rlm_query_batched([('q1', str, None), ('q2', str, None), ('q3', str, None)])\nprint(len(answers))"
         )
         assert result.stderr == ""
         assert "3" in result.stdout
@@ -97,7 +97,7 @@ class TestRlmQueryBatchedWithSubcallFn:
         completions = [_make_completion(f"resp {i}") for i in range(3)]
         subcall_fn = MagicMock(side_effect=completions)
         repl = LocalREPL(subcall_fn=subcall_fn)
-        result = repl.execute_code("rlm_query_batched(['a', 'b', 'c'])")
+        result = repl.execute_code("rlm_query_batched([('a', str, None), ('b', str, None), ('c', str, None)])")
         assert len(result.rlm_calls) == 3
         assert [c.response for c in result.rlm_calls] == ["resp 0", "resp 1", "resp 2"]
         repl.cleanup()
@@ -106,7 +106,7 @@ class TestRlmQueryBatchedWithSubcallFn:
         """rlm_query_batched should pass model to each subcall_fn call."""
         subcall_fn = MagicMock(return_value=_make_completion("ok"))
         repl = LocalREPL(subcall_fn=subcall_fn)
-        repl.execute_code("rlm_query_batched(['q1', 'q2'], model='custom-model')")
+        repl.execute_code("rlm_query_batched([('q1', str, None), ('q2', str, None)], model='custom-model')")
         assert subcall_fn.call_count == 2
         for call in subcall_fn.call_args_list:
             assert call[0][1] == "custom-model"
@@ -122,7 +122,7 @@ class TestRlmQueryBatchedWithSubcallFn:
             ]
         )
         repl = LocalREPL(subcall_fn=subcall_fn)
-        result = repl.execute_code("answers = rlm_query_batched(['a', 'b', 'c'])")
+        result = repl.execute_code("answers = rlm_query_batched([('a', str, None), ('b', str, None), ('c', str, None)])")
         assert result.stderr == ""
         answers = repl.locals["answers"]
         assert answers[0] == "ok 1"
@@ -144,7 +144,7 @@ class TestRlmQueryBatchedWithSubcallFn:
         """rlm_query_batched with single prompt should work."""
         subcall_fn = MagicMock(return_value=_make_completion("single"))
         repl = LocalREPL(subcall_fn=subcall_fn)
-        repl.execute_code("answers = rlm_query_batched(['only one'])")
+        repl.execute_code("answers = rlm_query_batched([('only one', str, None)])")
         assert repl.locals["answers"] == ["single"]
         subcall_fn.assert_called_once_with("only one", None)
         repl.cleanup()
@@ -156,7 +156,7 @@ class TestRlmQueryBatchedWithoutSubcallFn:
     def test_batched_falls_back_to_llm_query_batched(self):
         """Without subcall_fn, should fall back to llm_query_batched (error without handler)."""
         repl = LocalREPL()
-        repl.execute_code("answers = rlm_query_batched(['q1', 'q2'])")
+        repl.execute_code("answers = rlm_query_batched([('q1', str, None), ('q2', str, None)])")
         answers = repl.locals["answers"]
         assert len(answers) == 2
         assert all("Error" in a for a in answers)
@@ -170,7 +170,7 @@ class TestLlmQueryDoesNotUseSubcallFn:
         """llm_query should always do a plain LM call, never use subcall_fn."""
         subcall_fn = MagicMock(return_value=_make_completion("should not see this"))
         repl = LocalREPL(subcall_fn=subcall_fn)
-        repl.execute_code("response = llm_query('test')")
+        repl.execute_code("response = llm_query('test', return_type=str)")
         # Without a handler, llm_query returns an error — importantly, subcall_fn is NOT called
         assert "Error" in repl.locals["response"]
         subcall_fn.assert_not_called()
@@ -180,7 +180,7 @@ class TestLlmQueryDoesNotUseSubcallFn:
         """llm_query_batched should never use subcall_fn."""
         subcall_fn = MagicMock(return_value=_make_completion("nope"))
         repl = LocalREPL(subcall_fn=subcall_fn)
-        repl.execute_code("answers = llm_query_batched(['q1', 'q2'])")
+        repl.execute_code("answers = llm_query_batched([('q1', str, None), ('q2', str, None)])")
         assert all("Error" in a for a in repl.locals["answers"])
         subcall_fn.assert_not_called()
         repl.cleanup()
@@ -195,7 +195,7 @@ class TestRlmQueryScaffoldRestoration:
         repl = LocalREPL(subcall_fn=subcall_fn)
         repl.execute_code("rlm_query = lambda x: 'hijacked'")
         # After restoration, rlm_query should work normally
-        repl.execute_code("response = rlm_query('test')")
+        repl.execute_code("response = rlm_query('test', return_type=str)")
         assert repl.locals["response"] == "real"
         subcall_fn.assert_called_once()
         repl.cleanup()
@@ -205,6 +205,6 @@ class TestRlmQueryScaffoldRestoration:
         subcall_fn = MagicMock(return_value=_make_completion("real"))
         repl = LocalREPL(subcall_fn=subcall_fn)
         repl.execute_code("rlm_query_batched = 'garbage'")
-        repl.execute_code("answers = rlm_query_batched(['q1'])")
+        repl.execute_code("answers = rlm_query_batched([('q1', str, None)])")
         assert repl.locals["answers"] == ["real"]
         repl.cleanup()

@@ -2,6 +2,7 @@ import copy
 import io
 import json
 import os
+from datetime import datetime
 import shutil
 import sys
 import tempfile
@@ -119,6 +120,90 @@ _SAFE_BUILTINS = {
 }
 
 
+# Keys that live in self.globals and should never be copied into self.locals
+_GLOBALS_ONLY_KEYS: frozenset[str] = frozenset(
+    {"__builtins__", "__name__", "FINAL_VAR", "SHOW_VARS",
+     "llm_query", "llm_query_batched", "rlm_query", "rlm_query_batched"}
+)
+
+_TYPE_INSTRUCTIONS: dict[type, str] = {
+    int: "Respond with ONLY an integer. No explanation, units, or other text.",
+    float: "Respond with ONLY a decimal number. No explanation, units, or other text.",
+    bool: "Respond with ONLY 'true' or 'false'. No explanation or other text.",
+    list: "Respond with ONLY a valid JSON array. No explanation, markdown, or other text.",
+    dict: "Respond with ONLY a valid JSON object. No explanation, markdown, or other text.",
+    datetime: "Respond with ONLY a date in ISO 8601 format (YYYY-MM-DD). No explanation or other text.",
+}
+
+
+def _serialize_schema(schema: dict) -> str:
+    """Serialize a schema dict to JSON, converting Python type objects to their names."""
+    def _convert(v: Any) -> Any:
+        if isinstance(v, type):
+            return v.__name__
+        if isinstance(v, dict):
+            return {k2: _convert(v2) for k2, v2 in v.items()}
+        if isinstance(v, list):
+            return [_convert(item) for item in v]
+        return v
+
+    return json.dumps({k: _convert(v) for k, v in schema.items()})
+
+
+def _build_typed_prompt(prompt: str, return_type: type | None, schema: dict | None) -> str:
+    """Augment prompt with instructions for returning a specific native type."""
+    if return_type is None or return_type is str:
+        return prompt
+    suffix = _TYPE_INSTRUCTIONS.get(return_type, "")
+    if schema is not None and return_type in (list, dict):
+        suffix += " The response must conform to this schema: " + _serialize_schema(schema)
+    if suffix:
+        prompt = prompt + "\n\nIMPORTANT: " + suffix
+    return prompt
+
+
+def _parse_typed_response(response: str, return_type: type | None) -> Any:
+    """Parse LM response string into the requested native Python type."""
+    if return_type is None or return_type is str:
+        return response
+    if response is None:
+        raise ValueError("Response is None (model returned empty/blocked response)")
+    s = response.strip()
+    try:
+        if return_type is int:
+            return int(s)
+        if return_type is float:
+            return float(s)
+        if return_type is bool:
+            low = s.lower()
+            if low in ("true", "1", "yes"):
+                return True
+            if low in ("false", "0", "no"):
+                return False
+            raise ValueError(f"Cannot parse as bool: {s!r}")
+        if return_type is datetime:
+            return datetime.strptime(s[:10], "%Y-%m-%d")
+        if return_type in (list, dict):
+            # Strip markdown code blocks if present
+            if "```" in s:
+                lines = s.split("\n")
+                json_lines: list[str] = []
+                in_block = False
+                for line in lines:
+                    if line.startswith("```"):
+                        in_block = not in_block
+                        continue
+                    if in_block:
+                        json_lines.append(line)
+                extracted = "\n".join(json_lines).strip()
+                if extracted:
+                    s = extracted
+            return json.loads(s)
+    except (ValueError, json.JSONDecodeError) as e:
+        raise ValueError(f"Failed to parse response as {return_type.__name__}: {e}") from e
+    return response
+
+
 class LocalREPL(NonIsolatedEnv):
     """
     Local REPL environment with persistent Python namespace.
@@ -191,6 +276,7 @@ class LocalREPL(NonIsolatedEnv):
         # Add helper functions
         self.globals["FINAL_VAR"] = self._final_var
         self.globals["SHOW_VARS"] = self._show_vars
+        self.globals["datetime"] = datetime
         self.globals["llm_query"] = self._llm_query
         self.globals["llm_query_batched"] = self._llm_query_batched
         self.globals["rlm_query"] = self._rlm_query
@@ -239,7 +325,34 @@ class LocalREPL(NonIsolatedEnv):
             return "No variables created yet. Use ```repl``` blocks to create variables."
         return f"Available variables: {available}"
 
-    def _llm_query(self, prompt: str, model: str | None = None) -> str:
+    def _fallback_extract(self, raw_response: str, return_type: type, model: str | None) -> Any:
+        """Make a secondary LLM call to extract a typed value from a verbose/malformed response.
+
+        Called when _parse_typed_response raises ValueError. Asks the LLM to extract only
+        the typed value from the raw text and re-parses. Raises ValueError if still fails.
+        """
+        instruction = _TYPE_INSTRUCTIONS.get(return_type, "")
+        extraction_prompt = (
+            f"The following text should contain a {return_type.__name__} value but is not "
+            f"in the expected format. Extract only the {return_type.__name__} value and "
+            f"return it with no extra text.\n{instruction}\n\nText: {raw_response}"
+        )
+        request = LMRequest(prompt=extraction_prompt, model=model, depth=self.depth)
+        response = send_lm_request(self.lm_handler_address, request)
+        if not response.success:
+            raise ValueError(f"Fallback extraction failed: {response.error}")
+        self._pending_llm_calls.append(response.chat_completion)
+        # Raises ValueError if still unparseable — propagates to caller
+        return _parse_typed_response(response.chat_completion.response, return_type)
+
+    def _llm_query(
+        self,
+        prompt: str,
+        model: str | None = None,
+        *,
+        return_type: type,
+        schema: dict | None = None,
+    ) -> Any:
         """Query the LM with a single plain completion (no REPL, no recursion).
 
         This always makes a direct LM call via the handler, regardless of depth.
@@ -247,54 +360,103 @@ class LocalREPL(NonIsolatedEnv):
         Args:
             prompt: The prompt to send to the LM.
             model: Optional model name to use (if handler has multiple clients).
+            return_type: Optional native Python type to cast the response to (int, float,
+                bool, str, list, dict). When specified, the prompt is augmented with
+                formatting instructions and the response is parsed into that type.
+            schema: Optional JSON schema dict used when return_type is list or dict,
+                added to the prompt as a formatting constraint.
         """
         if not self.lm_handler_address:
             return "Error: No LM handler configured"
 
         try:
-            request = LMRequest(prompt=prompt, model=model, depth=self.depth)
+            typed_prompt = _build_typed_prompt(prompt, return_type, schema)
+            request = LMRequest(prompt=typed_prompt, model=model, depth=self.depth)
             response = send_lm_request(self.lm_handler_address, request)
 
             if not response.success:
                 return f"Error: {response.error}"
 
             self._pending_llm_calls.append(response.chat_completion)
-            return response.chat_completion.response
+            raw = response.chat_completion.response
+            try:
+                return _parse_typed_response(raw, return_type)
+            except ValueError:
+                return self._fallback_extract(raw, return_type, model)
         except Exception as e:
             return f"Error: LM query failed - {e}"
 
-    def _llm_query_batched(self, prompts: list[str], model: str | None = None) -> list[str]:
+    def _llm_query_batched(
+        self,
+        queries: list[tuple[str, type, dict | None]],
+        model: str | None = None,
+    ) -> list[Any]:
         """Query the LM with multiple prompts concurrently (no REPL, no recursion).
 
         This always makes direct LM calls via the handler, regardless of depth.
 
         Args:
-            prompts: List of prompts to send to the LM.
+            queries: List of (prompt, return_type, schema) tuples. Each tuple specifies
+                the prompt text, the Python type to parse the response into (str, int,
+                float, bool, list, dict), and an optional schema dict for list/dict types.
             model: Optional model name to use (if handler has multiple clients).
 
         Returns:
-            List of responses in the same order as input prompts.
+            List of responses in the same order as input queries, each parsed to its return_type.
         """
         if not self.lm_handler_address:
-            return ["Error: No LM handler configured"] * len(prompts)
+            return ["Error: No LM handler configured"] * len(queries)
         try:
+            typed_prompts = [_build_typed_prompt(p, rt, s) for p, rt, s in queries]
             responses = send_lm_request_batched(
-                self.lm_handler_address, prompts, model=model, depth=self.depth
+                self.lm_handler_address, typed_prompts, model=model, depth=self.depth
             )
 
             results = []
-            for response in responses:
+            to_retry: list[tuple[int, str, type]] = []  # (index, raw_response, return_type)
+            for i, (response, (_, rt, _)) in enumerate(zip(responses, queries)):
                 if not response.success:
                     results.append(f"Error: {response.error}")
                 else:
                     self._pending_llm_calls.append(response.chat_completion)
-                    results.append(response.chat_completion.response)
+                    raw = response.chat_completion.response
+                    try:
+                        results.append(_parse_typed_response(raw, rt))
+                    except ValueError:
+                        results.append(None)  # placeholder, filled by fallback below
+                        to_retry.append((i, raw, rt))
+
+            # Batch fallback: re-ask LLM to extract typed values for failed parses
+            if to_retry:
+                # Separate None-raw items (blocked/empty response) from malformed ones
+                real_retry = [(i, raw, rt) for i, raw, rt in to_retry if raw is not None]
+                for i, raw, rt in to_retry:
+                    if raw is None:
+                        results[i] = f"Error: model returned empty/blocked response"
+
+                if real_retry:
+                    fallback_prompts = []
+                    for (_, raw, rt) in real_retry:
+                        instruction = _TYPE_INSTRUCTIONS.get(rt, "")
+                        fallback_prompts.append(
+                            f"The following text should contain a {rt.__name__} value but is not "
+                            f"in the expected format. Extract only the {rt.__name__} value and "
+                            f"return it with no extra text.\n{instruction}\n\nText: {raw}"
+                        )
+                    fallback_responses = send_lm_request_batched(
+                        self.lm_handler_address, fallback_prompts, model=model, depth=self.depth
+                    )
+                    for (idx, _, rt), fb in zip(real_retry, fallback_responses):
+                        if not fb.success:
+                            raise ValueError(f"Fallback extraction failed: {fb.error}")
+                        self._pending_llm_calls.append(fb.chat_completion)
+                        results[idx] = _parse_typed_response(fb.chat_completion.response, rt)
 
             return results
         except Exception as e:
-            return [f"Error: LM query failed - {e}"] * len(prompts)
+            return [f"Error: LM query failed - {e}"] * len(queries)
 
-    def _rlm_query(self, prompt: str, model: str | None = None) -> str:
+    def _rlm_query(self, prompt: str, model: str | None = None, *, return_type: type, schema: dict | None = None) -> Any:
         """Spawn a recursive RLM sub-call for deeper thinking on a subtask.
 
         When a subcall callback is available (max_depth > 1), this spawns a child
@@ -304,44 +466,48 @@ class LocalREPL(NonIsolatedEnv):
         Args:
             prompt: The prompt to send to the child RLM.
             model: Optional model name override for the child.
+            return_type: Python type to parse the response into.
+            schema: Optional schema dict for list/dict return types.
         """
         if self.subcall_fn is not None:
             try:
-                completion = self.subcall_fn(prompt, model)
+                typed_prompt = _build_typed_prompt(prompt, return_type, schema)
+                completion = self.subcall_fn(typed_prompt, model)
                 self._pending_llm_calls.append(completion)
-                return completion.response
+                return _parse_typed_response(completion.response, return_type)
             except Exception as e:
                 return f"Error: RLM query failed - {e}"
 
         # Fall back to plain LM call if no recursive capability
-        return self._llm_query(prompt, model)
+        return self._llm_query(prompt, model, return_type=return_type, schema=schema)
 
-    def _rlm_query_batched(self, prompts: list[str], model: str | None = None) -> list[str]:
+    def _rlm_query_batched(self, queries: list[tuple[str, type, dict | None]], model: str | None = None) -> list[Any]:
         """Spawn recursive RLM sub-calls for multiple prompts.
 
         Each prompt gets its own child RLM for deeper thinking.
         Falls back to llm_query_batched if no recursive capability is configured.
 
         Args:
-            prompts: List of prompts for child RLMs.
+            queries: List of (prompt, return_type, schema) tuples.
             model: Optional model name override for the children.
 
         Returns:
-            List of responses in the same order as input prompts.
+            List of responses in the same order as input queries, each parsed to its return_type.
         """
         if self.subcall_fn is not None:
             results = []
-            for prompt in prompts:
+            for prompt, return_type, schema in queries:
                 try:
-                    completion = self.subcall_fn(prompt, model)
+                    typed_prompt = _build_typed_prompt(prompt, return_type, schema)
+                    completion = self.subcall_fn(typed_prompt, model)
                     self._pending_llm_calls.append(completion)
-                    results.append(completion.response)
+                    results.append(_parse_typed_response(completion.response, return_type))
                 except Exception as e:
                     results.append(f"Error: RLM query failed - {e}")
             return results
 
         # Fall back to plain batched LM call if no recursive capability
-        return self._llm_query_batched(prompts, model)
+        return self._llm_query_batched(queries, model)
 
     def load_context(self, context_payload: dict | list | str):
         """Load context into the environment as context_0 (and 'context' alias)."""
@@ -474,11 +640,16 @@ class LocalREPL(NonIsolatedEnv):
             elif name == "SHOW_VARS":
                 self.globals["SHOW_VARS"] = self._show_vars
             elif name == "context" and "context_0" in self.locals:
-                self.locals["context"] = self.locals["context_0"]
+                ctx = self.locals["context_0"]
+                self.locals["context"] = ctx
+                self.globals["context"] = ctx
             elif name == "history" and "history_0" in self.locals and not self.compaction:
-                self.locals["history"] = self.locals["history_0"]
+                hist = self.locals["history_0"]
+                self.locals["history"] = hist
+                self.globals["history"] = hist
             elif name == "history" and self.compaction:
                 self.locals["history"] = self._compaction_history
+                self.globals["history"] = self._compaction_history
 
     def execute_code(self, code: str) -> REPLResult:
         """Execute code in the persistent namespace and return result."""
@@ -489,12 +660,16 @@ class LocalREPL(NonIsolatedEnv):
 
         with self._capture_output() as (stdout_buf, stderr_buf), self._temp_cwd():
             try:
-                combined = {**self.globals, **self.locals}
-                exec(code, combined, combined)
+                # Merge user locals into globals so all user-defined names are reachable
+                # through __globals__ of any function defined here.  This ensures that
+                # after the mock→real function swap, functions look up llm_query (and each
+                # other) via self.globals rather than a stale per-call copy.
+                self.globals.update(self.locals)
+                exec(code, self.globals, self.globals)
 
-                # Update locals with new variables
-                for key, value in combined.items():
-                    if key not in self.globals and not key.startswith("_"):
+                # Sync new/updated user variables back to self.locals
+                for key, value in list(self.globals.items()):
+                    if not key.startswith("_") and key not in _GLOBALS_ONLY_KEYS:
                         self.locals[key] = value
 
                 # Restore scaffold so model overwrites (context = ..., llm_query = ...) don't persist

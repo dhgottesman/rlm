@@ -1,6 +1,7 @@
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 
 from rlm.clients import BaseLM, get_client
@@ -39,6 +40,86 @@ from rlm.utils.rlm_utils import filter_sensitive_keys
 from rlm.utils.token_utils import count_tokens, get_context_limit
 
 
+# ─── Mock LLM functions used during the CODE-phase syntax/structure test ──────
+
+# Structural errors that should cause mock-test failure.
+# Runtime data errors (KeyError, TypeError, AttributeError, …) are ignored
+# because they may simply be artefacts of the mock data, not real code problems.
+_STRUCTURAL_ERRORS = ("SyntaxError", "NameError", "ImportError", "ModuleNotFoundError", "IndentationError")
+
+
+class _MockDict(dict):
+    """Dict that silently returns 0.0 for any missing key.
+
+    This prevents KeyError crashes when code accesses fields (e.g. ``resp['turnout']``)
+    on a dict returned by a mock LLM call that has no schema information.
+    The 0.0 default keeps numeric operations alive without raising TypeError.
+    """
+
+    def __missing__(self, _key):  # noqa: D105
+        return 0.0
+
+
+def _generate_mock_from_schema(schema: dict) -> "_MockDict":
+    """Recursively build a ``_MockDict`` conforming to *schema*.
+
+    Schema values can be Python types (``str``, ``float``, …) or nested dicts.
+    """
+    result = _MockDict()
+    for key, val_type in schema.items():
+        if isinstance(val_type, dict):
+            result[key] = _generate_mock_from_schema(val_type)
+        elif val_type is str:
+            result[key] = "MOCK"
+        elif val_type is int:
+            result[key] = 0
+        elif val_type is float:
+            result[key] = 0.0
+        elif val_type is bool:
+            result[key] = False
+        elif val_type is list:
+            result[key] = []
+        else:
+            result[key] = None
+    return result
+
+
+def _mock_llm_query(prompt: str, model=None, *, return_type: type, schema: dict | None = None):
+    """Return type-appropriate mock data without making any real LLM call."""
+    if return_type is int:
+        return 0
+    if return_type is float:
+        return 0.0
+    if return_type is bool:
+        return False
+    if return_type is datetime:
+        return datetime(2000, 1, 1)
+    if return_type is list:
+        # Return a list with one mock element so ``for item in result`` loops run
+        return [_generate_mock_from_schema(schema)] if isinstance(schema, dict) else ["MOCK_RESPONSE"]
+    if return_type is dict:
+        return _generate_mock_from_schema(schema) if isinstance(schema, dict) else _MockDict()
+    return "MOCK_RESPONSE"
+
+
+def _mock_llm_query_batched(queries: list[tuple[str, type, "dict | None"]], model=None):
+    return [_mock_llm_query(p, model, return_type=rt, schema=s) for p, rt, s in queries]
+
+
+def _mock_rlm_query(prompt: str, model=None, *, return_type: type, schema: "dict | None" = None):
+    """Return type-appropriate mock data for an rlm_query call."""
+    return _mock_llm_query(prompt, model, return_type=return_type, schema=schema)
+
+
+def _mock_rlm_query_batched(queries: list[tuple[str, type, "dict | None"]], model=None):
+    return [_mock_rlm_query(p, model, return_type=rt, schema=s) for p, rt, s in queries]
+
+
+def _is_structural_mock_error(stderr: str) -> bool:
+    """Return True only for errors that indicate a real code problem (not mock-data artefacts)."""
+    return any(err in stderr for err in _STRUCTURAL_ERRORS)
+
+
 class RLM:
     """
     Recursive Language Model class that the user instantiates and runs on their tasks.
@@ -74,6 +155,8 @@ class RLM:
         on_subcall_complete: Callable[[int, str, float, str | None], None] | None = None,
         on_iteration_start: Callable[[int, int], None] | None = None,
         on_iteration_complete: Callable[[int, int, float], None] | None = None,
+        phased_flow: bool = True,
+        subcall_phased_flow: bool = False,
     ):
         """
         Args:
@@ -106,6 +189,10 @@ class RLM:
             on_subcall_complete: Callback fired when a child RLM completes. Args: (depth, model, duration, error_or_none).
             on_iteration_start: Callback fired when an iteration starts. Args: (depth, iteration_num).
             on_iteration_complete: Callback fired when an iteration completes. Args: (depth, iteration_num, duration).
+            phased_flow: When True (default), uses a structured plan → code (mock test) →
+                execute → debug flow instead of the open-ended iterative loop.
+            subcall_phased_flow: When True, child RLMs spawned via rlm_query / rlm_query_batched
+                also use the phased flow. Defaults to False (children use the legacy loop).
         """
         # Store config for spawning per-completion
         self.backend = backend
@@ -140,6 +227,9 @@ class RLM:
         self.max_timeout = max_timeout
         self.max_tokens = max_tokens
         self.max_errors = max_errors
+        # Phased flow: plan → code (mock test) → execute → debug.
+        self.phased_flow = phased_flow
+        self.subcall_phased_flow = subcall_phased_flow
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
@@ -303,6 +393,15 @@ class RLM:
             message_history = self._setup_prompt(prompt)
             self._context_peeked = self._inject_context_peek(message_history, environment)
 
+            # ── Phased flow state (root RLM only) ────────────────────────────
+            use_phases = self.phased_flow
+            phase: str | None = "plan" if use_phases else None
+            mock_attempts: int = 0
+            debug_attempts: int = 0
+            max_mock_retries: int = 2
+            max_debug_iterations: int = 3
+            mock_error: str | None = None
+
             compaction_count = 0
             try:
                 for i in range(self.max_iterations):
@@ -324,7 +423,7 @@ class RLM:
                                 lm_handler, environment, message_history, compaction_count
                             )
 
-                    # Current prompt = message history + additional prompt suffix
+                    # ── Build per-iteration user prompt ───────────────────────
                     context_count = (
                         environment.get_context_count()
                         if isinstance(environment, SupportsPersistence)
@@ -336,30 +435,124 @@ class RLM:
                         else 0
                     )
                     current_prompt = message_history + [
-                        build_user_prompt(root_prompt, i, context_count, history_count, getattr(self, "_context_total_length", 0), getattr(self, "_context_peeked", False))
+                        build_user_prompt(
+                            root_prompt,
+                            i,
+                            context_count,
+                            history_count,
+                            getattr(self, "_context_total_length", 0),
+                            getattr(self, "_context_peeked", False),
+                            phase=phase,
+                            mock_error=mock_error,
+                            debug_iteration=debug_attempts,
+                            max_debug_iterations=max_debug_iterations,
+                        )
                     ]
+
+                    # ── Execute iteration (phase-aware) ───────────────────────
+                    current_phase = phase  # snapshot before transition
+                    skip_exec = use_phases and current_phase == "plan"
+                    use_mock = use_phases and current_phase in ("code", "code_retry")
 
                     iteration: RLMIteration = self._completion_turn(
                         prompt=current_prompt,
                         lm_handler=lm_handler,
                         environment=environment,
+                        skip_execution=skip_exec,
+                        use_mock=use_mock,
                     )
 
                     # Check error/budget/token limits after each iteration
                     self._check_iteration_limits(iteration, i, lm_handler)
 
-                    # Check if RLM is done and has a final answer.
-                    # Prefer FINAL_VAR result from REPL execution.
-                    final_answer = None
-                    for block in iteration.code_blocks:
-                        if getattr(block.result, "final_answer", None):
-                            final_answer = block.result.final_answer
-                            break
-                    if final_answer is None:
-                        final_answer = find_final_answer(
-                            iteration.response, environment=environment
-                        )
-                    iteration.final_answer = final_answer
+                    # ── Phase transitions ─────────────────────────────────────
+                    if use_phases:
+                        if current_phase == "plan":
+                            phase = "code"
+
+                        elif current_phase in ("code", "code_retry"):
+                            structural_errors = [
+                                b.result.stderr
+                                for b in iteration.code_blocks
+                                if b.result.stderr and _is_structural_mock_error(b.result.stderr)
+                            ]
+                            if structural_errors or not iteration.code_blocks:
+                                mock_attempts += 1
+                                mock_error = (
+                                    structural_errors[0]
+                                    if structural_errors
+                                    else "No ```repl``` code block found in your response. "
+                                         "Write the complete program in a single ```repl``` block."
+                                )
+                                phase = (
+                                    "execute"  # give up on mock gating after max retries
+                                    if mock_attempts >= max_mock_retries
+                                    else "code_retry"
+                                )
+                                if mock_attempts >= max_mock_retries:
+                                    mock_error = None
+                                    self._restore_real_functions(environment)
+                                    if hasattr(environment, "locals"):
+                                        environment.locals.pop("final_answer", None)
+                            else:
+                                phase = "execute"
+                                mock_error = None
+                                # Clear stale mock results so the hint system doesn't
+                                # mislead the model into accepting mock output as real.
+                                if hasattr(environment, "locals"):
+                                    environment.locals.pop("final_answer", None)
+
+                        elif current_phase in ("execute", "debug"):
+                            exec_errors = [
+                                b.result.stderr
+                                for b in iteration.code_blocks
+                                if b.result.stderr
+                            ]
+                            if exec_errors:
+                                debug_attempts += 1
+                                phase = (
+                                    "debug_limit"
+                                    if debug_attempts >= max_debug_iterations
+                                    else "debug"
+                                )
+                        # "debug_limit" stays until model calls FINAL
+
+                    # ── Check for final answer (skip during plan / code phases) ──
+                    skip_final = use_phases and current_phase in ("plan", "code", "code_retry")
+                    if not skip_final:
+                        final_answer = None
+                        for block in iteration.code_blocks:
+                            if getattr(block.result, "final_answer", None):
+                                final_answer = block.result.final_answer
+                                break
+                        if final_answer is None:
+                            final_answer = find_final_answer(
+                                iteration.response, environment=environment
+                            )
+                        iteration.final_answer = final_answer
+
+                        if final_answer is not None:
+                            time_end = time.perf_counter()
+                            usage = lm_handler.get_usage_summary()
+                            self.verbose.print_final_answer(final_answer)
+                            self.verbose.print_summary(i + 1, time_end - time_start, usage.to_dict())
+
+                            if self.logger:
+                                self.logger.log(iteration)
+
+                            if self.persistent and isinstance(environment, SupportsPersistence):
+                                environment.add_history(message_history)
+
+                            return RLMChatCompletion(
+                                root_model=self.backend_kwargs.get("model_name", "unknown")
+                                if self.backend_kwargs
+                                else "unknown",
+                                prompt=prompt,
+                                response=final_answer,
+                                usage_summary=usage,
+                                execution_time=time_end - time_start,
+                                metadata=self.logger.get_trajectory() if self.logger else None,
+                            )
 
                     # Store as best partial answer (most recent response with content)
                     if iteration.response and iteration.response.strip():
@@ -372,27 +565,6 @@ class RLM:
                     # Verbose output for this iteration
                     self.verbose.print_iteration(iteration, i + 1)
 
-                    if final_answer is not None:
-                        time_end = time.perf_counter()
-                        usage = lm_handler.get_usage_summary()
-                        self.verbose.print_final_answer(final_answer)
-                        self.verbose.print_summary(i + 1, time_end - time_start, usage.to_dict())
-
-                        # Store message history in persistent environment
-                        if self.persistent and isinstance(environment, SupportsPersistence):
-                            environment.add_history(message_history)
-
-                        return RLMChatCompletion(
-                            root_model=self.backend_kwargs.get("model_name", "unknown")
-                            if self.backend_kwargs
-                            else "unknown",
-                            prompt=prompt,
-                            response=final_answer,
-                            usage_summary=usage,
-                            execution_time=time_end - time_start,
-                            metadata=self.logger.get_trajectory() if self.logger else None,
-                        )
-
                     # Format the iteration for the next prompt.
                     new_messages = format_iteration(iteration)
 
@@ -400,6 +572,24 @@ class RLM:
                     message_history.extend(new_messages)
                     if self.compaction and hasattr(environment, "append_compaction_entry"):
                         environment.append_compaction_entry(new_messages)
+
+                    # If final_answer is already stored in the REPL locals, inject a
+                    # hint so the model knows it can conclude without re-running code.
+                    if (
+                        not skip_final
+                        and hasattr(environment, "locals")
+                        and "final_answer" in environment.locals
+                        and environment.locals["final_answer"] is not None
+                    ):
+                        fa_val = environment.locals["final_answer"]
+                        fa_preview = str(fa_val)[:300]
+                        hint = (
+                            f"Note: your REPL already has `final_answer` set to:\n"
+                            f"  {fa_preview}\n"
+                            f"If this is correct, call `FINAL_VAR(final_answer)` now "
+                            f"(outside a repl block). No need to re-run the code."
+                        )
+                        message_history.append({"role": "user", "content": hint})
 
             except KeyboardInterrupt:
                 self.verbose.print_limit_exceeded("cancelled", "User interrupted execution")
@@ -605,24 +795,65 @@ class RLM:
         except Exception:
             return False
 
+    def _inject_mock_functions(self, environment: BaseEnv) -> None:
+        """Replace LLM query globals with mock versions for the upcoming execute_code call.
+
+        Only works for environments that expose a ``globals`` dict (LocalREPL).
+        For other environments the injection is silently skipped.
+        """
+        if not hasattr(environment, "globals"):
+            return
+        environment.globals["llm_query"] = _mock_llm_query
+        environment.globals["llm_query_batched"] = _mock_llm_query_batched
+        environment.globals["rlm_query"] = _mock_rlm_query
+        environment.globals["rlm_query_batched"] = _mock_rlm_query_batched
+
+    def _restore_real_functions(self, environment: BaseEnv) -> None:
+        """Restore real LLM query functions after a mock execution block.
+
+        Called explicitly after mock runs so that exceptions inside execute_code
+        (which skip _restore_scaffold) cannot leave mock functions in globals.
+        """
+        if not hasattr(environment, "globals"):
+            return
+        environment.globals["llm_query"] = environment._llm_query
+        environment.globals["llm_query_batched"] = environment._llm_query_batched
+        environment.globals["rlm_query"] = environment._rlm_query
+        environment.globals["rlm_query_batched"] = environment._rlm_query_batched
+
     def _completion_turn(
         self,
         prompt: str | dict[str, Any],
         lm_handler: LMHandler,
         environment: BaseEnv,
+        skip_execution: bool = False,
+        use_mock: bool = False,
     ) -> RLMIteration:
-        """
-        Perform a single iteration of the RLM, including prompting the model
-        and code execution + tool execution.
+        """Perform a single iteration of the RLM.
+
+        Args:
+            prompt: The current message history to send to the model.
+            lm_handler: The LM handler to use.
+            environment: The REPL environment.
+            skip_execution: If True, code blocks in the response are parsed but
+                not executed (used in the PLAN phase).
+            use_mock: If True, inject mock LLM functions before each code block
+                execution (used in the CODE phase to test syntax/structure
+                without making real API calls).
         """
         iter_start = time.perf_counter()
         response = lm_handler.completion(prompt)
         code_block_strs = find_code_blocks(response)
         code_blocks = []
 
-        for code_block_str in code_block_strs:
-            code_result: REPLResult = environment.execute_code(code_block_str)
-            code_blocks.append(CodeBlock(code=code_block_str, result=code_result))
+        if not skip_execution:
+            for code_block_str in code_block_strs:
+                if use_mock:
+                    self._inject_mock_functions(environment)
+                code_result: REPLResult = environment.execute_code(code_block_str)
+                if use_mock:
+                    self._restore_real_functions(environment)
+                code_blocks.append(CodeBlock(code=code_block_str, result=code_result))
 
         iteration_time = time.perf_counter() - iter_start
         return RLMIteration(
@@ -791,6 +1022,8 @@ class RLM:
             # Propagate callbacks to children for nested tracking
             on_subcall_start=self.on_subcall_start,
             on_subcall_complete=self.on_subcall_complete,
+            phased_flow=self.subcall_phased_flow,
+            subcall_phased_flow=self.subcall_phased_flow,
         )
         try:
             result = child.completion(prompt, root_prompt=None)

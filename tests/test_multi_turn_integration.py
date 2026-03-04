@@ -17,6 +17,11 @@ from rlm import RLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
 
 
+def reset_mock_lm(mock_lm: Mock, responses: list[str]) -> None:
+    """Reset a mock LM's completion side_effect with a new response sequence."""
+    mock_lm.completion.side_effect = list(responses)
+
+
 def create_mock_lm(responses: list[str]) -> Mock:
     """Create a mock LM that returns responses in order."""
     mock = Mock()
@@ -45,11 +50,12 @@ class TestMultiTurnPersistentEnvironment:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("First context")
                 first_env = rlm._persistent_env
 
-                mock_lm.completion.side_effect = list(responses)
+                reset_mock_lm(mock_lm, responses)
 
                 rlm.completion("Second context")
                 second_env = rlm._persistent_env
@@ -69,11 +75,12 @@ class TestMultiTurnPersistentEnvironment:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("First document")
-                mock_lm.completion.side_effect = list(responses)
+                reset_mock_lm(mock_lm, responses)
                 rlm.completion("Second document")
-                mock_lm.completion.side_effect = list(responses)
+                reset_mock_lm(mock_lm, responses)
                 rlm.completion("Third document")
 
                 env = rlm._persistent_env
@@ -95,11 +102,12 @@ class TestMultiTurnPersistentEnvironment:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("Context A")
-                mock_lm.completion.side_effect = list(responses)
+                reset_mock_lm(mock_lm, responses)
                 rlm.completion("Context B")
-                mock_lm.completion.side_effect = list(responses)
+                reset_mock_lm(mock_lm, responses)
                 rlm.completion("Context C")
 
                 env = rlm._persistent_env
@@ -130,11 +138,12 @@ class TestMultiTurnPersistentEnvironment:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("Compute 42 * 2")
                 assert rlm._persistent_env.locals.get("computed_value") == 84
 
-                mock_lm.completion.side_effect = list(second_responses)
+                reset_mock_lm(mock_lm, second_responses)
                 rlm.completion("Add 10 to the previous result")
 
                 assert rlm._persistent_env.locals.get("computed_value") == 84
@@ -156,9 +165,10 @@ class TestMultiTurnPromptAwareness:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("First")
-                mock_lm.completion.side_effect = list(responses)
+                reset_mock_lm(mock_lm, responses)
                 rlm.completion("Second")
 
                 last_prompt = mock_lm.completion.call_args[0][0]
@@ -179,9 +189,10 @@ class TestMultiTurnPromptAwareness:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("First task")
-                mock_lm.completion.side_effect = list(responses)
+                reset_mock_lm(mock_lm, responses)
                 rlm.completion("Second task")
 
                 last_prompt = mock_lm.completion.call_args[0][0]
@@ -210,10 +221,11 @@ class TestMultiTurnCodeExecution:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("Document A")
 
-                mock_lm.completion.side_effect = list(second_responses)
+                reset_mock_lm(mock_lm, second_responses)
                 rlm.completion("Document B")
 
                 env = rlm._persistent_env
@@ -236,10 +248,11 @@ class TestMultiTurnCodeExecution:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("First query")
 
-                mock_lm.completion.side_effect = list(second_responses)
+                reset_mock_lm(mock_lm, second_responses)
                 rlm.completion("Second query")
 
                 env = rlm._persistent_env
@@ -262,12 +275,13 @@ class TestNonPersistentMode:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=False,
+                phased_flow=False,
             )
 
             rlm.completion("First")
             assert rlm._persistent_env is None
 
-            mock_lm.completion.side_effect = list(responses)
+            reset_mock_lm(mock_lm, responses)
             rlm.completion("Second")
             assert rlm._persistent_env is None
 
@@ -295,6 +309,7 @@ class TestPersistentModeResourceManagement:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 rlm.completion("Test")
                 assert rlm._persistent_env is not None
@@ -313,6 +328,7 @@ class TestPersistentModeResourceManagement:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             )
             rlm.completion("Test")
             assert rlm._persistent_env is not None
@@ -372,15 +388,16 @@ class TestMultiTurnEndToEnd:
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
                 persistent=True,
+                phased_flow=False,
             ) as rlm:
                 result1 = rlm.completion("First document about cats")
                 assert "Summarized" in result1.response
 
-                mock_lm.completion.side_effect = list(turn2_responses)
+                reset_mock_lm(mock_lm, turn2_responses)
                 result2 = rlm.completion("Second document about dogs")
                 assert "Compared" in result2.response
 
-                mock_lm.completion.side_effect = list(turn3_responses)
+                reset_mock_lm(mock_lm, turn3_responses)
                 result3 = rlm.completion("Synthesize everything")
                 assert "synthesized" in result3.response
 
