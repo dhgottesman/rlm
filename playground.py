@@ -11,6 +11,8 @@ sys.path.append("/home/morg/students/gottesman3/rlm/rlm")
 from rlm import RLM
 from rlm.datasets.monaco import load_dataset
 from rlm.logger import RLMLogger
+from google.genai import errors as genai_errors
+
 
 load_dotenv()
 
@@ -29,18 +31,15 @@ def process_example(example):
     expected = example["validated_answer"]
     ex_id = example["ex_num"]
 
-    try:
-        r = rlm.completion(prompt)
-        return {
-            "question": prompt,
-            "expected": expected,
-            "ex_id": ex_id,
-            "response": r.response,
-            "usage_summary": {k: v.to_dict() for k, v in r.usage_summary.model_usage_summaries.items()},
-            "metadata": r.metadata,
-        }
-    except Exception as e:
-        print(f"Failed to process: {ex_id}, {e}")
+    r = rlm.completion(prompt)
+    return {
+        "question": prompt,
+        "expected": expected,
+        "ex_id": ex_id,
+        "response": r.response,
+        "usage_summary": {k: v.to_dict() for k, v in r.usage_summary.model_usage_summaries.items()},
+        "metadata": r.metadata,
+    }
 
 
 filename = "/home/morg/students/gottesman3/rlm/experiments/rlm_gemini-2.5-flash_monaco_v2.jsonl"
@@ -64,9 +63,18 @@ for example in tqdm(data, total=len(data)):
         try:
             record = process_example(example)
             break
-        except Exception as e:
-            print(f'Trying again {repr(e)}: {record["ex_id"]}')
-            time.sleep(61)
+        except genai_errors.ClientError as e:
+            if e.code == 429:
+                print(f'Rate limited, retrying: {repr(e)}')
+                time.sleep(61)
+            else:
+                raise  # don't retry other 4xx errors
+        except genai_errors.ServerError as e:
+            if e.code == 503:
+                print(f'Service unavailable, retrying: {repr(e)}')
+                time.sleep(61)
+            else:
+                raise
 
     if record:
         results.append(record)

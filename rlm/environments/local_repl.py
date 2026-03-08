@@ -138,9 +138,12 @@ _TYPE_INSTRUCTIONS: dict[type, str] = {
 
 def _serialize_schema(schema: dict) -> str:
     """Serialize a schema dict to JSON, converting Python type objects to their names."""
+    import types
     def _convert(v: Any) -> Any:
         if isinstance(v, type):
             return v.__name__
+        if isinstance(v, types.GenericAlias):
+            return v.__origin__.__name__
         if isinstance(v, dict):
             return {k2: _convert(v2) for k2, v2 in v.items()}
         if isinstance(v, list):
