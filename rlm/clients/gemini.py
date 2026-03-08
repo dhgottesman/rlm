@@ -74,6 +74,11 @@ class GeminiClient(BaseLM):
         )
 
         self._track_cost(response, model)
+        if response.text is None:
+            finish_reason = (
+                response.candidates[0].finish_reason if response.candidates else "unknown"
+            )
+            raise ValueError(f"Gemini returned no text content (finish_reason={finish_reason})")
         return response.text
 
     async def acompletion(

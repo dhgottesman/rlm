@@ -75,6 +75,11 @@ for example in tqdm(data, total=len(data)):
                 time.sleep(61)
             else:
                 raise
+        except ValueError as e:
+            if "Gemini returned no text content" in str(e):
+                print(f'No text content, retrying: {repr(e)}')
+            else:
+                raise
 
     if record:
         results.append(record)
